@@ -16,6 +16,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from webdriver_manager.chrome import ChromeDriverManager
 import logging
 from typing import List, Dict, Optional
 import threading
@@ -72,8 +73,9 @@ class NaverMapsCrawler:
     def start_driver(self):
         """Initialize the Chrome driver with configured options"""
         try:
-            # Railway에서는 ChromeDriver 경로를 자동으로 찾도록 설정
-            self.driver = webdriver.Chrome(options=self.options)
+            # webdriver-manager를 사용하여 ChromeDriver 자동 다운로드 및 설정
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=self.options)
             self.wait = WebDriverWait(self.driver, 20)
             logger.info("Chrome driver initialized successfully")
         except Exception as e:
