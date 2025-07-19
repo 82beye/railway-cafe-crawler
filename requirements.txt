@@ -1,10 +1,14 @@
-selenium==4.15.2
-python-dotenv==1.0.0
-webdriver-manager==4.0.1
-beautifulsoup4==4.12.2
-supabase==1.0.3
-pandas==2.1.4
-tqdm==4.66.1
+flask==2.3.3
 requests==2.31.0
-flask==3.0.0
-gunicorn==21.2.0
+python-dotenv==1.0.0
+supabase==1.0.4
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# Selenium dependencies (optional - fallback to Requests if not available)
+selenium==4.15.0
+webdriver-manager==4.0.1
+
+# Chrome dependencies for Railway (these might fail but we handle it gracefully)
+# google-chrome-stable
+# chromium-driver
