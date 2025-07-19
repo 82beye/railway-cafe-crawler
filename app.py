@@ -258,52 +258,119 @@ class NaverMapsCrawler:
                 except:
                     pass
 
-def save_to_supabase(cafes: List[Dict]):
-    """카페 정보를 Supabase에 저장"""
+def save_to_supabase(cafes: List[Dict]) -> Dict[str, any]:
+    """카페 정보를 Supabase에 저장하고 결과 반환"""
+    result = {
+        "success": False,
+        "saved_count": 0,
+        "updated_count": 0,
+        "failed_count": 0,
+        "total_count": len(cafes),
+        "errors": [],
+        "message": ""
+    }
+
     if not supabase:
-        logger.error("Supabase 클라이언트가 초기화되지 않았습니다.")
-        return
+        error_msg = "Supabase 클라이언트가 초기화되지 않았습니다."
+        logger.error(error_msg)
+        result["errors"].append(error_msg)
+        result["message"] = error_msg
+        return result
+
+    if not cafes:
+        result["message"] = "저장할 카페 데이터가 없습니다."
+        logger.warning(result["message"])
+        return result
 
     try:
         saved_count = 0
         updated_count = 0
+        failed_count = 0
 
-        for cafe in cafes:
+        logger.info(f"Supabase 저장 시작: {len(cafes)}개 카페 처리")
+
+        for idx, cafe in enumerate(cafes):
             try:
+                # 필수 필드 검증
+                if not cafe.get("name") or not cafe.get("address"):
+                    error_msg = f"카페 {idx+1}: 필수 필드(name, address) 누락"
+                    logger.warning(error_msg)
+                    result["errors"].append(error_msg)
+                    failed_count += 1
+                    continue
+
                 # 메뉴 아이템을 JSON 문자열로 변환
-                menu_items_json = json.dumps(cafe["menu_items"], ensure_ascii=False) if cafe["menu_items"] else "[]"
+                menu_items = cafe.get("menu_items", [])
+                menu_items_json = json.dumps(menu_items, ensure_ascii=False) if menu_items else "[]"
 
                 cafe_data = {
                     "name": cafe["name"],
-                    "category": cafe["category"],
+                    "category": cafe.get("category", "카페"),
                     "address": cafe["address"],
-                    "locationKeyword": cafe["locationKeyword"],
-                    "business_district": cafe["business_district"],
+                    "locationKeyword": cafe.get("locationKeyword", ""),
+                    "business_district": cafe.get("business_district", "기타"),
                     "menu_items": menu_items_json,
                     "latitude": cafe.get("latitude"),
                     "longitude": cafe.get("longitude")
                 }
 
-                # 기존 데이터 확인
-                existing = supabase.table('cafes').select("*").eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
+                logger.info(f"처리 중 [{idx+1}/{len(cafes)}]: {cafe['name']} - {cafe['address']}")
+
+                # 기존 데이터 확인 (이름과 주소로 중복 체크)
+                existing = supabase.table('cafes').select("id, name, address").eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
 
                 if existing.data:
-                    result = supabase.table('cafes').update(cafe_data).eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
-                    logger.info(f"Supabase 데이터 업데이트 성공: {cafe['name']}")
-                    updated_count += 1
+                    # 기존 데이터 업데이트
+                    update_result = supabase.table('cafes').update(cafe_data).eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
+                    if update_result.data:
+                        logger.info(f"✅ Supabase 업데이트 성공: {cafe['name']}")
+                        updated_count += 1
+                    else:
+                        error_msg = f"업데이트 실패: {cafe['name']} - 응답 데이터 없음"
+                        logger.error(error_msg)
+                        result["errors"].append(error_msg)
+                        failed_count += 1
                 else:
-                    result = supabase.table('cafes').insert(cafe_data).execute()
-                    logger.info(f"Supabase 새 데이터 저장 성공: {cafe['name']}")
-                    saved_count += 1
+                    # 새 데이터 삽입
+                    insert_result = supabase.table('cafes').insert(cafe_data).execute()
+                    if insert_result.data:
+                        logger.info(f"✅ Supabase 새 데이터 저장 성공: {cafe['name']}")
+                        saved_count += 1
+                    else:
+                        error_msg = f"삽입 실패: {cafe['name']} - 응답 데이터 없음"
+                        logger.error(error_msg)
+                        result["errors"].append(error_msg)
+                        failed_count += 1
 
             except Exception as e:
-                logger.error(f"Supabase 개별 카페 저장 실패 ({cafe['name']}): {str(e)}")
+                error_msg = f"카페 저장 실패 ({cafe.get('name', 'Unknown')}): {str(e)}"
+                logger.error(error_msg)
+                result["errors"].append(error_msg)
+                failed_count += 1
                 continue
 
-        logger.info(f"Supabase 저장 완료 - 새로 저장: {saved_count}개, 업데이트: {updated_count}개")
+        # 결과 설정
+        result["saved_count"] = saved_count
+        result["updated_count"] = updated_count
+        result["failed_count"] = failed_count
+        result["success"] = (saved_count + updated_count) > 0
+
+        if result["success"]:
+            result["message"] = f"저장 완료 - 새로 저장: {saved_count}개, 업데이트: {updated_count}개"
+            if failed_count > 0:
+                result["message"] += f", 실패: {failed_count}개"
+        else:
+            result["message"] = f"모든 카페 저장 실패 - 실패: {failed_count}개"
+
+        logger.info(f"🏁 Supabase 저장 완료: {result['message']}")
+        return result
 
     except Exception as e:
-        logger.error(f"Supabase 전체 저장 프로세스 실패: {str(e)}")
+        error_msg = f"Supabase 전체 저장 프로세스 실패: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        result["errors"].append(error_msg)
+        result["message"] = error_msg
+        return result
 
 def get_coords_from_address(address: str) -> Optional[Dict[str, float]]:
     """주소를 좌표로 변환"""
@@ -433,20 +500,43 @@ def crawl():
                 crawler_used = "failed"
 
         # Supabase에 저장
+        save_result = {"success": False, "message": "저장 시도하지 않음"}
         if cafe_data:
-            save_to_supabase(cafe_data)
-            logger.info(f"크롤링 완료: {len(cafe_data)}개 카페 데이터 저장됨")
+            logger.info(f"🚀 크롤링 완료: {len(cafe_data)}개 카페 수집, Supabase 저장 시작")
+            save_result = save_to_supabase(cafe_data)
+            logger.info(f"💾 저장 결과: {save_result['message']}")
         else:
             logger.warning("크롤링된 카페 데이터가 없습니다.")
+            save_result = {"success": False, "message": "크롤링된 카페 데이터가 없어 저장하지 않음"}
 
-        return jsonify({
-            "success": True,
+        # 전체 성공 여부 판단
+        overall_success = len(cafe_data) > 0 and save_result.get("success", False)
+
+        response_data = {
+            "success": overall_success,
             "message": f"크롤링 완료: {len(cafe_data)}개 카페 수집",
             "data_count": len(cafe_data),
             "location": f"{lat:.5f},{lng:.5f}",
             "crawler_used": crawler_used,
-            "details": [{"name": cafe["name"], "address": cafe["address"]} for cafe in cafe_data[:3]]
-        })
+            "details": [{"name": cafe["name"], "address": cafe["address"]} for cafe in cafe_data[:3]],
+            "database_save": {
+                "success": save_result.get("success", False),
+                "saved_count": save_result.get("saved_count", 0),
+                "updated_count": save_result.get("updated_count", 0),
+                "failed_count": save_result.get("failed_count", 0),
+                "total_count": save_result.get("total_count", 0),
+                "message": save_result.get("message", ""),
+                "errors": save_result.get("errors", [])
+            }
+        }
+
+        # 저장 실패 시 전체 메시지 업데이트
+        if not save_result.get("success", False) and len(cafe_data) > 0:
+            response_data["message"] += f" (저장 실패: {save_result.get('message', '')})"
+        elif save_result.get("success", False):
+            response_data["message"] += f" (DB 저장: {save_result.get('saved_count', 0) + save_result.get('updated_count', 0)}개 성공)"
+
+        return jsonify(response_data)
 
     except Exception as e:
         logger.error(f"크롤링 중 치명적 오류: {e}", exc_info=True)
