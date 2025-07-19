@@ -4,6 +4,7 @@ python-dotenv==1.0.0
 supabase==1.0.4
 beautifulsoup4==4.12.2
 lxml==4.9.3
+gunicorn==21.2.0
 
 # Selenium dependencies (optional - fallback to Requests if not available)
 selenium==4.15.0

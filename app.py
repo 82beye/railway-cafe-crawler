@@ -459,4 +459,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"Flask 앱 시작 - 포트: {port}")
     logger.info(f"크롤링 모드: {'Selenium + Requests' if SELENIUM_AVAILABLE else 'Requests Only'}")
+    # Railway에서는 gunicorn이 앱을 실행하므로 개발 서버는 로컬에서만 사용
     app.run(host='0.0.0.0', port=port, debug=False)
