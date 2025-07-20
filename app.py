@@ -8,11 +8,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from urllib.parse import quote
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from webdriver_manager.chrome import ChromeDriverManager
 import logging
 from typing import List, Dict, Optional
 import threading
-from bs4 import BeautifulSoup
-import re
 
 # Configure logging
 logging.basicConfig(
@@ -20,24 +27,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Selenium import를 try-except로 감싸서 Railway 환경에서 fallback 처리
-try:
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.keys import Keys
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
-    from webdriver_manager.chrome import ChromeDriverManager
-    SELENIUM_AVAILABLE = True
-    logger.info("Selenium 모듈 로드 성공")
-except ImportError as e:
-    SELENIUM_AVAILABLE = False
-    logger.warning(f"Selenium 모듈 로드 실패: {e}")
-    logger.info("Requests 기반 크롤링으로 fallback 합니다.")
 
 # Flask 앱 초기화
 app = Flask(__name__)
@@ -48,329 +37,316 @@ load_dotenv()
 # API 키 로드
 KAKAO_API_KEY = os.getenv("NEXT_PUBLIC_KAKAO_REST_API_KEY")
 
-# Supabase 클라이언트 안전하게 초기화
+# Supabase 클라이언트 초기화
 supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 supabase_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 
-supabase = None
 if not supabase_url or not supabase_key:
     logger.error("Supabase 환경 변수가 설정되지 않았습니다.")
-    logger.error(f"SUPABASE_URL: {'설정됨' if supabase_url else '미설정'}")
-    logger.error(f"SUPABASE_KEY: {'설정됨' if supabase_key else '미설정'}")
 else:
-    try:
-        supabase: Client = create_client(supabase_url, supabase_key)
-        logger.info("Supabase 클라이언트 초기화 성공")
-    except Exception as e:
-        logger.error(f"Supabase 클라이언트 초기화 실패: {e}")
-        supabase = None
+    supabase: Client = create_client(supabase_url, supabase_key)
 
-# KAKAO API 키 확인
-if not KAKAO_API_KEY:
-    logger.error("KAKAO API 키가 설정되지 않았습니다.")
-else:
-    logger.info("KAKAO API 키 설정 확인됨")
-
-class RequestsCrawler:
-    """Requests 기반 크롤러 (Railway 환경 대안)"""
-
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        self.processed_cafes = set()
-
-    def search_nearby_cafes(self, lat: float, lng: float, limit: int = 5) -> List[Dict]:
-        """Kakao API를 사용해서 근처 카페 검색"""
-        cafe_data = []
-
-        if not KAKAO_API_KEY:
-            logger.error("Kakao API 키가 필요합니다.")
-            return cafe_data
-
-        try:
-            # Kakao Local API로 카페 검색
-            url = "https://dapi.kakao.com/v2/local/search/keyword.json"
-            headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
-            params = {
-                "query": "카페",
-                "x": lng,
-                "y": lat,
-                "radius": 1000,  # 1km 반경
-                "size": limit,
-                "sort": "distance"
-            }
-
-            response = self.session.get(url, headers=headers, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            if data.get('documents'):
-                for idx, place in enumerate(data['documents'][:limit]):
-                    try:
-                        cafe_info = {
-                            "name": place.get('place_name', ''),
-                            "category": place.get('category_name', '카페'),
-                            "address": place.get('address_name', ''),
-                            "locationKeyword": f"{lat:.5f},{lng:.5f}",
-                            "latitude": float(place.get('y', 0)),
-                            "longitude": float(place.get('x', 0)),
-                            "business_district": self.get_business_district_by_coords(lat, lng),
-                            "menu_items": self.generate_sample_menu(),  # 샘플 메뉴 생성
-                            "phone": place.get('phone', ''),
-                            "place_url": place.get('place_url', '')
-                        }
-
-                        cafe_key = f"{cafe_info['name']}_{cafe_info['address']}"
-                        if cafe_key not in self.processed_cafes:
-                            cafe_data.append(cafe_info)
-                            self.processed_cafes.add(cafe_key)
-                            logger.info(f"카페 수집: {cafe_info['name']} ({cafe_info['address']})")
-
-                    except Exception as e:
-                        logger.warning(f"카페 데이터 처리 오류: {e}")
-                        continue
-
-            logger.info(f"Kakao API로 {len(cafe_data)}개 카페 수집 완료")
-            return cafe_data
-
-        except Exception as e:
-            logger.error(f"Kakao API 크롤링 오류: {e}")
-            return cafe_data
-
-    def generate_sample_menu(self) -> List[Dict]:
-        """샘플 메뉴 생성 (실제 메뉴는 별도 API나 크롤링 필요)"""
-        sample_menus = [
-            {"name": "아메리카노", "price": 4500, "description": "진한 원두의 깔끔한 맛", "image_url": ""},
-            {"name": "카페라떼", "price": 5000, "description": "부드러운 우유와 에스프레소", "image_url": ""},
-            {"name": "카푸치노", "price": 5500, "description": "폭신한 우유거품", "image_url": ""},
-            {"name": "바닐라라떼", "price": 5800, "description": "달콤한 바닐라 향", "image_url": ""},
-            {"name": "아이스티", "price": 4000, "description": "시원한 홍차", "image_url": ""}
-        ]
-        # 랜덤하게 3-5개 메뉴 선택
-        import random
-        return random.sample(sample_menus, random.randint(3, 5))
-
-    def get_business_district_by_coords(self, lat: float, lng: float) -> str:
-        """좌표 기반 업무지구 판단"""
-        # 강남구 (강남 업무지구)
-        if 37.48 <= lat <= 37.53 and 127.01 <= lng <= 127.11:
-            return "강남 업무지구"
-        # 영등포구 (여의도 업무지구)
-        elif 37.51 <= lat <= 37.53 and 126.90 <= lng <= 126.95:
-            return "여의도 업무지구"
-        # 중구 (종로/광화문 업무지구)
-        elif 37.56 <= lat <= 37.58 and 126.97 <= lng <= 127.00:
-            return "종로/광화문 업무지구"
-        # 강남구 삼성동 (삼성동 업무지구)
-        elif 37.50 <= lat <= 37.52 and 127.05 <= lng <= 127.08:
-            return "삼성동 업무지구"
-        # 마포구 (상암 업무지구)
-        elif 37.57 <= lat <= 37.59 and 126.88 <= lng <= 126.91:
-            return "상암 업무지구"
-        # 분당 (판교 업무지구)
-        elif 37.38 <= lat <= 37.42 and 127.10 <= lng <= 127.13:
-            return "판교 업무지구"
-        else:
-            return "기타"
+# 검색할 장소 목록
+SEARCH_LOCATIONS = [
+    "광화문역", "종각역", "시청역", "을지로입구역",
+    "강남역", "역삼역", "삼성중앙역", "선릉역", "테헤란로",
+    "여의도역", "여의나루역", "국회의사당역",
+    "삼성중앙역", "봉은사역", "코엑스",
+    "디지털미디어시티역", "월드컵경기장역",
+    "판교역", "정자역",
+]
 
 class NaverMapsCrawler:
-    """Selenium 기반 크롤러 (Chrome이 사용 가능한 환경에서만)"""
-
     def __init__(self):
-        if not SELENIUM_AVAILABLE:
-            raise RuntimeError("Selenium이 사용할 수 없는 환경입니다.")
-
         self.options = Options()
-        # Railway 환경에 최적화된 Chrome 옵션
-        self.options.add_argument("--headless")
+        self.options.add_argument("--headless")  # Railway에서는 headless 모드 필수
         self.options.add_argument("--no-sandbox")
         self.options.add_argument("--disable-dev-shm-usage")
         self.options.add_argument("--disable-gpu")
-        self.options.add_argument("--disable-features=VizDisplayCompositor")
         self.options.add_argument("--window-size=1920,1080")
         self.options.add_argument("--remote-debugging-port=9222")
-        self.options.add_argument("--disable-extensions")
-        self.options.add_argument("--disable-plugins")
-        self.options.add_argument("--disable-images")
-        self.options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-        # 메모리 최적화
-        self.options.add_argument("--max_old_space_size=4096")
-        self.options.add_argument("--memory-pressure-off")
-
+        self.options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         self.driver = None
         self.wait = None
         self.processed_cafes = set()
 
     def start_driver(self):
-        """Chrome driver 안전하게 초기화"""
+        """Initialize the Chrome driver with configured options"""
         try:
-            # ChromeDriver 경로 수정 시도
-            try:
-                service = Service(ChromeDriverManager().install())
-                # 실제 chromedriver 바이너리 경로 찾기
-                driver_path = service.path
-                if 'THIRD_PARTY_NOTICES' in driver_path:
-                    # 잘못된 경로인 경우 수정
-                    driver_dir = os.path.dirname(driver_path)
-                    actual_driver = os.path.join(driver_dir, 'chromedriver')
-                    if os.path.exists(actual_driver):
-                        service = Service(actual_driver)
-                        logger.info(f"ChromeDriver 경로 수정: {actual_driver}")
-                    else:
-                        # chromedriver-linux64 폴더 내부 확인
-                        linux_driver = os.path.join(driver_dir, 'chromedriver-linux64', 'chromedriver')
-                        if os.path.exists(linux_driver):
-                            service = Service(linux_driver)
-                            logger.info(f"ChromeDriver 경로 수정: {linux_driver}")
-                        else:
-                            raise FileNotFoundError("ChromeDriver 바이너리를 찾을 수 없습니다.")
-
-            except Exception as e:
-                logger.error(f"ChromeDriver 설정 오류: {e}")
-                raise
-
+            # webdriver-manager를 사용하여 ChromeDriver 자동 다운로드 및 설정
+            service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=self.options)
-            self.wait = WebDriverWait(self.driver, 15)
+            self.wait = WebDriverWait(self.driver, 20)
             logger.info("Chrome driver initialized successfully")
-
         except Exception as e:
             logger.error(f"Failed to initialize Chrome driver: {e}")
             raise
 
-    def crawl_cafes(self, search_url: str, location: str, limit: int = 5) -> list:
-        """Selenium 크롤링 (기존 로직)"""
+    def quit_driver(self):
+        """Safely quit the Chrome driver"""
+        if self.driver:
+            self.driver.quit()
+            logger.info("Chrome driver closed successfully")
+
+    def wait_and_find_element(self, by: By, selector: str, timeout: int = 20) -> Optional[webdriver.remote.webelement.WebElement]:
+        """Wait for and find a single element with error handling"""
+        try:
+            element = WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((by, selector))
+            )
+            return element
+        except TimeoutException:
+            logger.warning(f"Timeout waiting for element: {selector}")
+            return None
+        except Exception as e:
+            logger.error(f"Error finding element {selector}: {e}")
+            return None
+
+    def wait_for_iframe(self, iframe_id: str, timeout: int = 20) -> bool:
+        """Wait for iframe to be present and available"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((By.ID, iframe_id))
+            )
+            logger.info(f"Found iframe: {iframe_id}")
+            return True
+        except TimeoutException:
+            logger.warning(f"Iframe not found: {iframe_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Error waiting for iframe {iframe_id}: {e}")
+            return False
+
+    def switch_to_iframe(self, iframe_id: str, timeout: int = 20) -> bool:
+        """Safely switch to an iframe with error handling"""
+        try:
+            self.driver.switch_to.default_content()
+            time.sleep(2)
+
+            if self.wait_for_iframe(iframe_id):
+                WebDriverWait(self.driver, timeout).until(
+                    EC.frame_to_be_available_and_switch_to_it(iframe_id)
+                )
+                logger.info(f"Successfully switched to iframe: {iframe_id}")
+                time.sleep(2)
+                return True
+            return False
+        except TimeoutException:
+            logger.warning(f"Timeout switching to iframe: {iframe_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Error switching to iframe {iframe_id}: {e}")
+            return False
+
+    def get_menu_items(self) -> List[Dict[str, str]]:
+        """Extract menu items from the current page"""
+        menu_items = []
+        try:
+            menu_tabs = self.driver.find_elements(By.CSS_SELECTOR, "div.YYh8o a.tpj9w._tab-menu")
+            menu_tab = None
+            for tab in menu_tabs:
+                try:
+                    span_element = tab.find_element(By.CSS_SELECTOR, "span.veBoZ")
+                    if span_element.text == "메뉴":
+                        menu_tab = tab
+                        break
+                except:
+                    continue
+
+            if menu_tab:
+                self.driver.execute_script("arguments[0].click();", menu_tab)
+                logger.info("메뉴 탭 클릭 성공")
+                time.sleep(3)
+            else:
+                logger.warning("메뉴 탭을 찾지 못함")
+                return menu_items
+
+            menu_links = self.driver.find_elements(By.CSS_SELECTOR, "a.xPf1B")
+            for menu in menu_links:
+                try:
+                    name = menu.find_element(By.CSS_SELECTOR, "span.lPzHi").text
+                    try:
+                        description = menu.find_element(By.CSS_SELECTOR, "div.kPogF").text
+                    except:
+                        description = ""
+
+                    price_elem = menu.find_element(By.CSS_SELECTOR, "div.GXS1X")
+                    price = price_elem.text.replace("원", "").replace(",", "").strip()
+
+                    try:
+                        img_url = menu.find_element(By.CSS_SELECTOR, "img.K0PDV").get_attribute("src")
+                    except:
+                        img_url = ""
+
+                    menu_items.append({
+                        "name": name,
+                        "description": description,
+                        "price": price,
+                        "image_url": img_url
+                    })
+                    logger.info(f"메뉴 수집: {name}")
+                except Exception as e:
+                    logger.warning(f"메뉴 아이템 파싱 오류: {e}")
+                    continue
+
+        except Exception as e:
+            logger.warning(f"메뉴 정보 수집 중 오류: {e}")
+
+        return menu_items
+
+    def switch_to_search_iframe(self, timeout: int = 20) -> bool:
+        """동적으로 search 결과 iframe 탐색 및 진입"""
+        self.driver.switch_to.default_content()
+        time.sleep(2)
+        try:
+            iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+            for iframe in iframes:
+                src = iframe.get_attribute("src")
+                if src and "search" in src:
+                    self.driver.switch_to.frame(iframe)
+                    logger.info(f"search iframe 진입: {src}")
+                    time.sleep(2)
+                    return True
+            logger.warning("search 관련 iframe을 찾지 못함")
+            return False
+        except Exception as e:
+            logger.error(f"iframe 탐색 중 오류: {e}")
+            return False
+
+    def crawl_cafes(self, search_url: str, location: str, limit: int = 20) -> list:
+        """특정 위치의 카페를 크롤링합니다."""
         cafe_data = []
         try:
             self.start_driver()
-            # 기존 크롤링 로직...
-            logger.info("Selenium 크롤링 시작")
-            return cafe_data
-        except Exception as e:
-            logger.error(f"Selenium 크롤링 실패: {e}")
-            return cafe_data
-        finally:
-            if self.driver:
+            self.driver.get(search_url)
+            logger.info(f"검색 URL 진입: {search_url}")
+            time.sleep(7)
+
+            if not self.switch_to_search_iframe():
+                logger.error("search iframe 진입 실패")
+                return cafe_data
+
+            cafe_links = self.driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink.N_KDL")
+            if not cafe_links:
+                logger.warning(f"{location}: 카페 리스트를 찾지 못함")
+                return cafe_data
+
+            processed_count = 0
+            for cafe_link in cafe_links[:limit]:
                 try:
-                    self.driver.quit()
-                except:
-                    pass
+                    cafe_name = cafe_link.find_element(By.CSS_SELECTOR, "span.TYaxT").text
 
-def save_to_supabase(cafes: List[Dict]) -> Dict[str, any]:
-    """카페 정보를 Supabase에 저장하고 결과 반환"""
-    result = {
-        "success": False,
-        "saved_count": 0,
-        "updated_count": 0,
-        "failed_count": 0,
-        "total_count": len(cafes),
-        "errors": [],
-        "message": ""
-    }
+                    cafe_key = f"{cafe_name}_{location}"
+                    if cafe_key in self.processed_cafes:
+                        logger.info(f"중복 카페 건너뛰기: {cafe_name} ({location})")
+                        continue
 
-    if not supabase:
-        error_msg = "Supabase 클라이언트가 초기화되지 않았습니다."
-        logger.error(error_msg)
-        result["errors"].append(error_msg)
-        result["message"] = error_msg
-        return result
+                    try:
+                        category = cafe_link.find_element(By.CSS_SELECTOR, "span.KCMnt").text
+                    except:
+                        category = "카페"
 
-    if not cafes:
-        result["message"] = "저장할 카페 데이터가 없습니다."
-        logger.warning(result["message"])
-        return result
+                    cafe_link.click()
+                    time.sleep(3)
 
-    try:
-        saved_count = 0
-        updated_count = 0
-        failed_count = 0
+                    self.driver.switch_to.default_content()
+                    entry_iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                    entry_found = False
+                    for iframe in entry_iframes:
+                        src = iframe.get_attribute("src")
+                        if src and "entry" in src:
+                            self.driver.switch_to.frame(iframe)
+                            entry_found = True
+                            time.sleep(2)
+                            break
 
-        logger.info(f"Supabase 저장 시작: {len(cafes)}개 카페 처리")
+                    if not entry_found:
+                        logger.warning(f"상세 entry iframe을 찾지 못함: {cafe_name}")
+                        continue
 
-        for idx, cafe in enumerate(cafes):
-            try:
-                # 필수 필드 검증
-                if not cafe.get("name") or not cafe.get("address"):
-                    error_msg = f"카페 {idx+1}: 필수 필드(name, address) 누락"
-                    logger.warning(error_msg)
-                    result["errors"].append(error_msg)
-                    failed_count += 1
+                    address_elem = self.wait_and_find_element(By.CSS_SELECTOR, "span.LDgIH")
+                    address = address_elem.text if address_elem else "주소 없음"
+
+                    menu_items = self.get_menu_items()
+
+                    cafe_info = {
+                        "name": cafe_name,
+                        "category": category,
+                        "address": address,
+                        "location": location,
+                        "menu_items": menu_items,
+                        "business_district": self.get_business_district(location)
+                    }
+                    cafe_data.append(cafe_info)
+                    self.processed_cafes.add(cafe_key)
+                    logger.info(f"수집 완료: {cafe_name} ({location}) - 메뉴 {len(menu_items)}개")
+
+                    self.switch_to_search_iframe()
+                    processed_count += 1
+
+                except Exception as e:
+                    logger.error(f"카페 상세 수집 오류: {e}")
+                    self.switch_to_search_iframe()
                     continue
 
-                # 메뉴 아이템을 JSON 문자열로 변환
-                menu_items = cafe.get("menu_items", [])
-                menu_items_json = json.dumps(menu_items, ensure_ascii=False) if menu_items else "[]"
+            logger.info(f"총 {len(cafe_data)}개 카페 수집 완료 ({location})")
+            return cafe_data
 
+        except Exception as e:
+            logger.error(f"크롤링 중 치명적 오류: {e}")
+            return cafe_data
+        finally:
+            self.quit_driver()
+
+    def get_business_district(self, location: str) -> str:
+        """위치 정보를 기반으로 업무지구를 반환합니다."""
+        if any(keyword in location for keyword in ["강남", "역삼", "선릉", "테헤란로"]):
+            return "강남 업무지구"
+        elif any(keyword in location for keyword in ["여의도", "여의나루", "국회"]):
+            return "여의도 업무지구"
+        elif any(keyword in location for keyword in ["광화문", "종각", "시청", "을지로"]):
+            return "종로/광화문 업무지구"
+        elif any(keyword in location for keyword in ["삼성중앙", "봉은사", "코엑스"]):
+            return "삼성동 업무지구"
+        elif any(keyword in location for keyword in ["디지털미디어시티", "월드컵"]):
+            return "상암 업무지구"
+        elif any(keyword in location for keyword in ["판교", "정자"]):
+            return "판교 업무지구"
+        else:
+            return "기타"
+
+def save_to_supabase(cafes: List[Dict]):
+    """카페 정보를 Supabase에 저장"""
+    try:
+        for cafe in cafes:
+            try:
+                # 실제 Supabase 테이블 스키마에 맞게 구조 조정
                 cafe_data = {
                     "name": cafe["name"],
                     "category": cafe.get("category", "카페"),
                     "address": cafe["address"],
-                    "locationKeyword": cafe.get("locationKeyword", ""),
-                    "business_district": cafe.get("business_district", "기타"),
-                    "menu_items": menu_items_json,
+                    "location": cafe.get("location", {}),
                     "latitude": cafe.get("latitude"),
-                    "longitude": cafe.get("longitude")
+                    "longitude": cafe.get("longitude"),
+                    "locationKeyword": f'"{cafe.get("locationKeyword", "")}"',  # 따옴표 포함
+                    "menu_items": json.dumps(cafe.get("menu_items", {}), ensure_ascii=False)
                 }
 
-                logger.info(f"처리 중 [{idx+1}/{len(cafes)}]: {cafe['name']} - {cafe['address']}")
-
-                # 기존 데이터 확인 (이름과 주소로 중복 체크)
-                existing = supabase.table('cafes').select("id, name, address").eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
+                existing = supabase.table('cafes').select("*").eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
 
                 if existing.data:
-                    # 기존 데이터 업데이트
-                    update_result = supabase.table('cafes').update(cafe_data).eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
-                    if update_result.data:
-                        logger.info(f"✅ Supabase 업데이트 성공: {cafe['name']}")
-                        updated_count += 1
-                    else:
-                        error_msg = f"업데이트 실패: {cafe['name']} - 응답 데이터 없음"
-                        logger.error(error_msg)
-                        result["errors"].append(error_msg)
-                        failed_count += 1
+                    result = supabase.table('cafes').update(cafe_data).eq("name", cafe["name"]).eq("address", cafe["address"]).execute()
+                    logger.info(f"Supabase 데이터 업데이트 성공: {cafe['name']}")
                 else:
-                    # 새 데이터 삽입
-                    insert_result = supabase.table('cafes').insert(cafe_data).execute()
-                    if insert_result.data:
-                        logger.info(f"✅ Supabase 새 데이터 저장 성공: {cafe['name']}")
-                        saved_count += 1
-                    else:
-                        error_msg = f"삽입 실패: {cafe['name']} - 응답 데이터 없음"
-                        logger.error(error_msg)
-                        result["errors"].append(error_msg)
-                        failed_count += 1
+                    result = supabase.table('cafes').insert(cafe_data).execute()
+                    logger.info(f"Supabase 새 데이터 저장 성공: {cafe['name']}")
 
             except Exception as e:
-                error_msg = f"카페 저장 실패 ({cafe.get('name', 'Unknown')}): {str(e)}"
-                logger.error(error_msg)
-                result["errors"].append(error_msg)
-                failed_count += 1
+                logger.error(f"Supabase 개별 카페 저장 실패 ({cafe['name']}): {str(e)}")
                 continue
 
-        # 결과 설정
-        result["saved_count"] = saved_count
-        result["updated_count"] = updated_count
-        result["failed_count"] = failed_count
-        result["success"] = (saved_count + updated_count) > 0
-
-        if result["success"]:
-            result["message"] = f"저장 완료 - 새로 저장: {saved_count}개, 업데이트: {updated_count}개"
-            if failed_count > 0:
-                result["message"] += f", 실패: {failed_count}개"
-        else:
-            result["message"] = f"모든 카페 저장 실패 - 실패: {failed_count}개"
-
-        logger.info(f"🏁 Supabase 저장 완료: {result['message']}")
-        return result
-
     except Exception as e:
-        error_msg = f"Supabase 전체 저장 프로세스 실패: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        result["errors"].append(error_msg)
-        result["message"] = error_msg
-        return result
+        logger.error(f"Supabase 전체 저장 프로세스 실패: {str(e)}")
 
 def get_coords_from_address(address: str) -> Optional[Dict[str, float]]:
     """주소를 좌표로 변환"""
@@ -381,7 +357,7 @@ def get_coords_from_address(address: str) -> Optional[Dict[str, float]]:
         url = "https://dapi.kakao.com/v2/local/search/address.json"
         headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
         params = {"query": address}
-        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
 
@@ -390,16 +366,17 @@ def get_coords_from_address(address: str) -> Optional[Dict[str, float]]:
             return {"lat": float(doc['y']), "lon": float(doc['x'])}
 
         url = "https://dapi.kakao.com/v2/local/search/keyword.json"
-        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
         if data['documents']:
             doc = data['documents'][0]
             return {"lat": float(doc['y']), "lon": float(doc['x'])}
 
-    except Exception as e:
-        logger.error(f"주소 좌표 변환 실패: {address} - {e}")
-
+    except requests.exceptions.RequestException as e:
+        logger.error(f"카카오 API 호출 오류: {e}")
+    except (KeyError, IndexError):
+        logger.error(f"주소 좌표 변환 실패: {address}")
     return None
 
 def get_search_url(lat: float, lon: float) -> str:
@@ -414,11 +391,6 @@ def home():
         "endpoints": {
             "crawl": "/crawl?lat=37.5665&lng=126.9780",
             "status": "/status"
-        },
-        "status": {
-            "supabase": "연결됨" if supabase else "연결 실패",
-            "kakao_api": "설정됨" if KAKAO_API_KEY else "미설정",
-            "selenium": "사용 가능" if SELENIUM_AVAILABLE else "Requests 모드"
         }
     })
 
@@ -426,30 +398,12 @@ def home():
 def status():
     return jsonify({
         "status": "running",
-        "message": "Cafe Crawler is ready",
-        "services": {
-            "supabase": "OK" if supabase else "ERROR",
-            "kakao_api": "OK" if KAKAO_API_KEY else "ERROR",
-            "crawler_mode": "Selenium" if SELENIUM_AVAILABLE else "Requests"
-        }
+        "message": "Cafe Crawler is ready"
     })
 
 @app.route('/crawl')
 def crawl():
     try:
-        # 서비스 상태 확인
-        if not supabase:
-            return jsonify({
-                "error": "Supabase 연결이 설정되지 않았습니다.",
-                "details": "데이터베이스 환경 변수를 확인해주세요."
-            }), 500
-
-        if not KAKAO_API_KEY:
-            return jsonify({
-                "error": "Kakao API 키가 설정되지 않았습니다.",
-                "details": "NEXT_PUBLIC_KAKAO_REST_API_KEY 환경 변수를 확인해주세요."
-            }), 500
-
         # 쿼리 파라미터에서 좌표 가져오기
         lat = request.args.get('lat', type=float)
         lng = request.args.get('lng', type=float)
@@ -460,94 +414,32 @@ def crawl():
                 "example": "/crawl?lat=37.5665&lng=126.9780"
             }), 400
 
-        # 좌표 유효성 검증
-        if not (33 <= lat <= 38) or not (125 <= lng <= 130):
-            return jsonify({
-                "error": "유효하지 않은 좌표입니다. 한국 영역 내의 좌표를 입력해주세요.",
-                "provided": {"lat": lat, "lng": lng}
-            }), 400
-
         logger.info(f"크롤링 시작: lat={lat}, lng={lng}")
 
-        # 크롤링 방법 선택 (Requests 우선, Selenium 폴백)
-        cafe_data = []
-        crawler_used = "none"
+        # 크롤링 실행
+        crawler = NaverMapsCrawler()
+        search_url = get_search_url(lat, lng)
+        location_str = f"{lat:.5f},{lng:.5f}"
 
-        try:
-            # Requests 기반 크롤링 시도
-            requests_crawler = RequestsCrawler()
-            cafe_data = requests_crawler.search_nearby_cafes(lat, lng, limit=8)
-            crawler_used = "requests_kakao_api"
-            logger.info(f"Requests 크롤링 성공: {len(cafe_data)}개 카페 수집")
-
-        except Exception as e:
-            logger.warning(f"Requests 크롤링 실패: {e}")
-
-            # Selenium 크롤링 시도 (fallback)
-            if SELENIUM_AVAILABLE:
-                try:
-                    selenium_crawler = NaverMapsCrawler()
-                    search_url = get_search_url(lat, lng)
-                    location_str = f"{lat:.5f},{lng:.5f}"
-                    cafe_data = selenium_crawler.crawl_cafes(search_url, location_str, limit=5)
-                    crawler_used = "selenium_naver"
-                    logger.info(f"Selenium 크롤링 성공: {len(cafe_data)}개 카페 수집")
-                except Exception as se:
-                    logger.error(f"Selenium 크롤링도 실패: {se}")
-                    crawler_used = "failed"
-            else:
-                logger.error("Selenium을 사용할 수 없어 크롤링 실패")
-                crawler_used = "failed"
+        cafe_data = crawler.crawl_cafes(search_url, location_str, limit=10)  # Railway 제한을 고려하여 limit 축소
 
         # Supabase에 저장
-        save_result = {"success": False, "message": "저장 시도하지 않음"}
         if cafe_data:
-            logger.info(f"🚀 크롤링 완료: {len(cafe_data)}개 카페 수집, Supabase 저장 시작")
-            save_result = save_to_supabase(cafe_data)
-            logger.info(f"💾 저장 결과: {save_result['message']}")
-        else:
-            logger.warning("크롤링된 카페 데이터가 없습니다.")
-            save_result = {"success": False, "message": "크롤링된 카페 데이터가 없어 저장하지 않음"}
+            save_to_supabase(cafe_data)
 
-        # 전체 성공 여부 판단
-        overall_success = len(cafe_data) > 0 and save_result.get("success", False)
-
-        response_data = {
-            "success": overall_success,
+        return jsonify({
+            "success": True,
             "message": f"크롤링 완료: {len(cafe_data)}개 카페 수집",
             "data_count": len(cafe_data),
-            "location": f"{lat:.5f},{lng:.5f}",
-            "crawler_used": crawler_used,
-            "details": [{"name": cafe["name"], "address": cafe["address"]} for cafe in cafe_data[:3]],
-            "database_save": {
-                "success": save_result.get("success", False),
-                "saved_count": save_result.get("saved_count", 0),
-                "updated_count": save_result.get("updated_count", 0),
-                "failed_count": save_result.get("failed_count", 0),
-                "total_count": save_result.get("total_count", 0),
-                "message": save_result.get("message", ""),
-                "errors": save_result.get("errors", [])
-            }
-        }
-
-        # 저장 실패 시 전체 메시지 업데이트
-        if not save_result.get("success", False) and len(cafe_data) > 0:
-            response_data["message"] += f" (저장 실패: {save_result.get('message', '')})"
-        elif save_result.get("success", False):
-            response_data["message"] += f" (DB 저장: {save_result.get('saved_count', 0) + save_result.get('updated_count', 0)}개 성공)"
-
-        return jsonify(response_data)
+            "location": location_str
+        })
 
     except Exception as e:
-        logger.error(f"크롤링 중 치명적 오류: {e}", exc_info=True)
+        logger.error(f"크롤링 중 오류: {e}")
         return jsonify({
-            "error": f"크롤링 중 오류가 발생했습니다: {str(e)}",
-            "type": type(e).__name__
+            "error": f"크롤링 중 오류가 발생했습니다: {str(e)}"
         }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Flask 앱 시작 - 포트: {port}")
-    logger.info(f"크롤링 모드: {'Selenium + Requests' if SELENIUM_AVAILABLE else 'Requests Only'}")
-    # Railway에서는 gunicorn이 앱을 실행하므로 개발 서버는 로컬에서만 사용
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
