@@ -20,6 +20,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import logging
 from typing import List, Dict, Optional
 import threading
+from geopy.distance import geodesic
 
 # Configure logging
 logging.basicConfig(
@@ -213,32 +214,47 @@ class NaverMapsCrawler:
             logger.error(f"iframe 탐색 중 오류: {e}")
             return False
 
-    def crawl_cafes(self, search_url: str, location: str, limit: int = 20) -> list:
-        """특정 위치의 카페를 크롤링합니다."""
-        cafe_data = []
+    def crawl_cafes(self, lat: float, lng: float, limit: int = 10, max_distance_km: float = 2.0) -> List[Dict]:
+        """네이버 지도에서 카페 정보를 크롤링합니다."""
+        cafes = []
         try:
+            # 좌표를 지역명으로 변환
+            region_name = get_region_name_from_coords(lat, lng)
+            if region_name:
+                search_query = f"{region_name} 카페"
+                logger.info(f"검색 쿼리: {search_query}")
+            else:
+                search_query = "카페"
+                logger.warning("지역명 변환 실패, 기본 검색어 사용")
+            
+            # 네이버 지도 검색 URL 생성 (지역명 기반)
+            search_url = f"https://map.naver.com/v5/search/{quote(search_query)}"
+            logger.info(f"네이버 지도 검색 URL: {search_url}")
+            
             self.start_driver()
             self.driver.get(search_url)
-            logger.info(f"검색 URL 진입: {search_url}")
             time.sleep(7)
 
             if not self.switch_to_search_iframe():
                 logger.error("search iframe 진입 실패")
-                return cafe_data
+                return cafes
 
             cafe_links = self.driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink.N_KDL")
             if not cafe_links:
-                logger.warning(f"{location}: 카페 리스트를 찾지 못함")
-                return cafe_data
+                logger.warning(f"카페 리스트를 찾지 못함")
+                return cafes
 
-            processed_count = 0
-            for cafe_link in cafe_links[:limit]:
+            collected_count = 0
+            for cafe_link in cafe_links:
+                if collected_count >= limit:
+                    break
+                    
                 try:
                     cafe_name = cafe_link.find_element(By.CSS_SELECTOR, "span.TYaxT").text
 
-                    cafe_key = f"{cafe_name}_{location}"
+                    cafe_key = f"{cafe_name}_{lat}_{lng}"
                     if cafe_key in self.processed_cafes:
-                        logger.info(f"중복 카페 건너뛰기: {cafe_name} ({location})")
+                        logger.info(f"중복 카페 건너뛰기: {cafe_name}")
                         continue
 
                     try:
@@ -267,34 +283,57 @@ class NaverMapsCrawler:
                     address_elem = self.wait_and_find_element(By.CSS_SELECTOR, "span.LDgIH")
                     address = address_elem.text if address_elem else "주소 없음"
 
+                    # 주소를 좌표로 변환
+                    coords = get_coords_from_address(address)
+                    
                     menu_items = self.get_menu_items()
 
                     cafe_info = {
                         "name": cafe_name,
                         "category": category,
                         "address": address,
-                        "location": location,
-                        "menu_items": menu_items,
-                        "business_district": self.get_business_district(location)
+                        "locationKeyword": region_name or "",
+                        "menu_items": menu_items
                     }
-                    cafe_data.append(cafe_info)
-                    self.processed_cafes.add(cafe_key)
-                    logger.info(f"수집 완료: {cafe_name} ({location}) - 메뉴 {len(menu_items)}개")
+                    
+                    # 좌표 정보 추가 및 거리 계산
+                    if coords:
+                        cafe_info["latitude"] = coords["lat"]
+                        cafe_info["longitude"] = coords["lon"]
+                        
+                        distance = calculate_distance(
+                            lat, lng,
+                            coords["lat"], coords["lon"]
+                        )
+                        cafe_info["distance_km"] = round(distance, 2)
+                        
+                        if distance <= max_distance_km:
+                            cafes.append(cafe_info)
+                            self.processed_cafes.add(cafe_key)
+                            collected_count += 1
+                            logger.info(f"카페 {collected_count}: {cafe_name} (거리: {distance:.2f}km) 수집 완료")
+                        else:
+                            logger.debug(f"카페 {cafe_name} 거리 초과 (거리: {distance:.2f}km > {max_distance_km}km)")
+                    else:
+                        # 좌표 정보가 없는 경우에도 수집
+                        cafes.append(cafe_info)
+                        self.processed_cafes.add(cafe_key)
+                        collected_count += 1
+                        logger.info(f"카페 {collected_count}: {cafe_name} (좌표 정보 없음) 수집 완료")
 
                     self.switch_to_search_iframe()
-                    processed_count += 1
 
                 except Exception as e:
                     logger.error(f"카페 상세 수집 오류: {e}")
                     self.switch_to_search_iframe()
                     continue
 
-            logger.info(f"총 {len(cafe_data)}개 카페 수집 완료 ({location})")
-            return cafe_data
+            logger.info(f"총 {len(cafes)}개 카페 수집 완료")
+            return cafes
 
         except Exception as e:
             logger.error(f"크롤링 중 치명적 오류: {e}")
-            return cafe_data
+            return cafes
         finally:
             self.quit_driver()
 
@@ -348,6 +387,64 @@ def save_to_supabase(cafes: List[Dict]):
     except Exception as e:
         logger.error(f"Supabase 전체 저장 프로세스 실패: {str(e)}")
 
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """두 좌표 간의 거리를 계산합니다 (단위: km)"""
+    try:
+        distance = geodesic((lat1, lon1), (lat2, lon2)).kilometers
+        return distance
+    except Exception as e:
+        logger.error(f"거리 계산 오류: {e}")
+        return float('inf')
+
+def get_region_name_from_coords(lat: float, lon: float) -> Optional[str]:
+    """좌표를 지역명으로 변환 (동 단위까지 포함)"""
+    if not KAKAO_API_KEY:
+        logger.error("Kakao API 키가 설정되지 않았습니다.")
+        return None
+    
+    try:
+        url = "https://dapi.kakao.com/v2/local/geo/coord2address.json"
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params = {"x": lon, "y": lat}
+        
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data['documents']:
+            # 동 정보가 있는 주소를 우선 사용 (지번 주소 우선, 없으면 도로명 주소)
+            address_info = data['documents'][0]
+            region_name = None
+            
+            # 지번 주소에서 동 정보 확인
+            if address_info.get('address'):
+                region_2depth = address_info['address']['region_2depth_name']  # 구
+                region_3depth = address_info['address'].get('region_3depth_name', '')  # 동
+                if region_3depth:  # 동 정보가 있으면 사용
+                    region_name = f"{region_2depth} {region_3depth}"
+                else:
+                    region_name = region_2depth
+            
+            # 지번 주소에 동 정보가 없으면 도로명 주소 확인
+            if not region_3depth and address_info.get('road_address'):
+                region_2depth = address_info['road_address']['region_2depth_name']  # 구
+                region_3depth = address_info['road_address'].get('region_3depth_name', '')  # 동
+                if region_3depth:  # 동 정보가 있으면 사용
+                    region_name = f"{region_2depth} {region_3depth}"
+                elif not region_name:  # 지번 주소도 없었다면
+                    region_name = region_2depth
+            
+            if not region_name:
+                return None
+            
+            logger.info(f"좌표 {lat}, {lon}을 지역명 '{region_name}'으로 변환")
+            return region_name
+        
+        return None
+    except Exception as e:
+        logger.error(f"좌표-지역명 변환 오류: {e}")
+        return None
+
 def get_coords_from_address(address: str) -> Optional[Dict[str, float]]:
     """주소를 좌표로 변환"""
     if not KAKAO_API_KEY:
@@ -379,9 +476,7 @@ def get_coords_from_address(address: str) -> Optional[Dict[str, float]]:
         logger.error(f"주소 좌표 변환 실패: {address}")
     return None
 
-def get_search_url(lat: float, lon: float) -> str:
-    """좌표 기반 검색 URL 생성"""
-    return f"https://map.naver.com/p/search/카페?c=15.00,0,0,0,dh&searchType=place&query=카페&lon={lon}&lat={lat}"
+
 
 # Flask 라우트 정의
 @app.route('/')
@@ -401,44 +496,42 @@ def status():
         "message": "Cafe Crawler is ready"
     })
 
-@app.route('/crawl')
+@app.route('/crawl', methods=['GET'])
 def crawl():
+    """카페 크롤링 API"""
     try:
-        # 쿼리 파라미터에서 좌표 가져오기
         lat = request.args.get('lat', type=float)
         lng = request.args.get('lng', type=float)
-
-        if not lat or not lng:
-            return jsonify({
-                "error": "lat과 lng 파라미터가 필요합니다.",
-                "example": "/crawl?lat=37.5665&lng=126.9780"
-            }), 400
-
-        logger.info(f"크롤링 시작: lat={lat}, lng={lng}")
-
-        # 크롤링 실행
+        limit = request.args.get('limit', default=10, type=int)
+        max_distance = request.args.get('max_distance', default=2.0, type=float)
+        
+        if lat is None or lng is None:
+            return jsonify({"error": "lat과 lng 파라미터가 필요합니다."}), 400
+        
+        logger.info(f"크롤링 요청: 위도={lat}, 경도={lng}, 제한={limit}, 최대거리={max_distance}km")
+        
+        # 크롤러 인스턴스 생성
         crawler = NaverMapsCrawler()
-        search_url = get_search_url(lat, lng)
-        location_str = f"{lat:.5f},{lng:.5f}"
-
-        cafe_data = crawler.crawl_cafes(search_url, location_str, limit=10)  # Railway 제한을 고려하여 limit 축소
-
+        
+        # 카페 크롤링 실행
+        cafes = crawler.crawl_cafes(lat, lng, limit=limit, max_distance_km=max_distance)
+        
+        if not cafes:
+            return jsonify({"message": "수집된 카페가 없습니다.", "data": []}), 200
+        
         # Supabase에 저장
-        if cafe_data:
-            save_to_supabase(cafe_data)
-
+        save_to_supabase(cafes)
+        
         return jsonify({
-            "success": True,
-            "message": f"크롤링 완료: {len(cafe_data)}개 카페 수집",
-            "data_count": len(cafe_data),
-            "location": location_str
-        })
-
+            "message": f"{len(cafes)}개의 카페 정보를 수집했습니다.",
+            "data": cafes,
+            "search_location": {"lat": lat, "lng": lng},
+            "max_distance_km": max_distance
+        }), 200
+        
     except Exception as e:
-        logger.error(f"크롤링 중 오류: {e}")
-        return jsonify({
-            "error": f"크롤링 중 오류가 발생했습니다: {str(e)}"
-        }), 500
+        logger.error(f"크롤링 API 오류: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
