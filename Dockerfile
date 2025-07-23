@@ -37,8 +37,8 @@ ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 ENV DISPLAY=:99
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 포트 노출
-EXPOSE 5000
+# 포트 노출 (Railway에서 동적 할당)
+EXPOSE $PORT
 
-# 애플리케이션 실행
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "--workers", "1", "app:app"]
+# 애플리케이션 실행 (Railway의 동적 PORT 사용)
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:$PORT --timeout 300 --workers 1 app:app"]
