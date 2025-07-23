@@ -42,6 +42,28 @@ pip install -r requirements.txt
 python app.py
 ```
 
+## 문제 해결
+
+### ChromeDriver 오류 (WinError 193, Exec format error)
+
+이 오류는 Railway 환경에서 ChromeDriver 실행 파일이 올바르게 설치되지 않았을 때 발생합니다.
+
+**해결 방법:**
+1. Dockerfile이 Chrome과 ChromeDriver를 올바르게 설치하도록 수정됨
+2. 환경 변수로 Chrome 바이너리와 ChromeDriver 경로 설정
+3. Railway 환경에 최적화된 Chrome 옵션 적용
+
+### 메모리 부족 오류
+
+- Chrome 옵션에서 메모리 사용량 최적화
+- `--single-process`, `--disable-dev-shm-usage` 등의 옵션 적용
+- Railway Pro 플랜 사용 권장
+
+### 타임아웃 오류
+
+- gunicorn 타임아웃을 300초로 설정
+- 크롤링 작업이 완료될 때까지 충분한 시간 제공
+
 ## 주의사항
 
 - Selenium을 사용하므로 메모리 사용량이 높습니다

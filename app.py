@@ -64,9 +64,27 @@ class NaverMapsCrawler:
         self.options.add_argument("--no-sandbox")
         self.options.add_argument("--disable-dev-shm-usage")
         self.options.add_argument("--disable-gpu")
+        self.options.add_argument("--disable-extensions")
+        self.options.add_argument("--disable-plugins")
+        self.options.add_argument("--disable-images")
+        self.options.add_argument("--disable-javascript")
         self.options.add_argument("--window-size=1920,1080")
         self.options.add_argument("--remote-debugging-port=9222")
-        self.options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        self.options.add_argument("--single-process")
+        self.options.add_argument("--disable-background-timer-throttling")
+        self.options.add_argument("--disable-renderer-backgrounding")
+        self.options.add_argument("--disable-backgrounding-occluded-windows")
+        self.options.add_argument("--disable-ipc-flooding-protection")
+        self.options.add_argument("--memory-pressure-off")
+        self.options.add_argument("--max_old_space_size=4096")
+        self.options.add_argument("user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Chrome 바이너리 경로 설정 (환경 변수 활용)
+        chrome_bin = os.environ.get('CHROME_BIN', '/usr/bin/google-chrome')
+        if os.path.exists(chrome_bin):
+            self.options.binary_location = chrome_bin
+            logger.info(f"Using Chrome binary from: {chrome_bin}")
+        
         self.driver = None
         self.wait = None
         self.processed_cafes = set()
@@ -74,14 +92,33 @@ class NaverMapsCrawler:
     def start_driver(self):
         """Initialize the Chrome driver with configured options"""
         try:
-            # webdriver-manager를 사용하여 ChromeDriver 자동 다운로드 및 설정
-            service = Service(ChromeDriverManager().install())
+            # 환경 변수에서 ChromeDriver 경로 확인
+            chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
+            
+            if os.path.exists(chromedriver_path):
+                service = Service(chromedriver_path)
+                logger.info(f"Using ChromeDriver from: {chromedriver_path}")
+            else:
+                # 로컬 환경에서는 webdriver-manager 사용
+                service = Service(ChromeDriverManager().install())
+                logger.info("Using ChromeDriver from webdriver-manager")
+            
             self.driver = webdriver.Chrome(service=service, options=self.options)
             self.wait = WebDriverWait(self.driver, 20)
             logger.info("Chrome driver initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize Chrome driver: {e}")
-            raise
+            error_msg = f"Failed to initialize Chrome driver: {e}"
+            logger.error(error_msg)
+            
+            # Railway 환경에서 자주 발생하는 오류들에 대한 추가 정보 제공
+            if "Exec format error" in str(e):
+                logger.error("ChromeDriver executable format error - check if correct architecture is used")
+            elif "Permission denied" in str(e):
+                logger.error("ChromeDriver permission denied - check file permissions")
+            elif "No such file or directory" in str(e):
+                logger.error(f"ChromeDriver not found at expected path: {chromedriver_path}")
+            
+            raise Exception(error_msg)
 
     def quit_driver(self):
         """Safely quit the Chrome driver"""
