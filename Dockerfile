@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     unzip \
-    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Chrome 설치
@@ -16,22 +15,6 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
     && apt-get update \
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
-
-# ChromeDriver 설치 (Chrome for Testing API 사용)
-RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}') \
-    && echo "Chrome version: $CHROME_VERSION" \
-    && CHROMEDRIVER_URL="https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json" \
-    && CHROMEDRIVER_VERSION=$(curl -s $CHROMEDRIVER_URL | grep -o '"version":"'$CHROME_VERSION'"' | head -1 | cut -d'"' -f4) \
-    && if [ -z "$CHROMEDRIVER_VERSION" ]; then \
-        CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE"); \
-    fi \
-    && echo "ChromeDriver version: $CHROMEDRIVER_VERSION" \
-    && wget -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" \
-    && unzip /tmp/chromedriver.zip -d /tmp/ \
-    && mv /tmp/chromedriver /usr/local/bin/chromedriver \
-    && chmod +x /usr/local/bin/chromedriver \
-    && rm /tmp/chromedriver.zip \
-    && chromedriver --version
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -46,9 +29,6 @@ COPY . .
 # 환경 변수 설정
 ENV PYTHONUNBUFFERED=1
 ENV CHROME_BIN=/usr/bin/google-chrome
-ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
-ENV DISPLAY=:99
-ENV DEBIAN_FRONTEND=noninteractive
 
 # 포트 노출
 EXPOSE 5000
