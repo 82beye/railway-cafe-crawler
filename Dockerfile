@@ -36,7 +36,7 @@ ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 ENV DISPLAY=:99
 
 # 포트 노출
-EXPOSE 5000
+EXPOSE $PORT
 
 # 애플리케이션 실행
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "--workers", "1", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "--timeout", "300", "--workers", "1", "app:app"]
