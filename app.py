@@ -92,32 +92,25 @@ class NaverMapsCrawler:
     def start_driver(self):
         """Initialize the Chrome driver with configured options"""
         try:
-            # 환경 변수에서 ChromeDriver 경로 확인
             chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
             
             if not os.path.exists(chromedriver_path):
-                logger.error(f"ChromeDriver not found at the specified path: {chromedriver_path}")
-                raise FileNotFoundError(f"ChromeDriver not found at {chromedriver_path}")
+                error_msg = f"ChromeDriver not found at the specified path: {chromedriver_path}"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
 
-            # Railway 환경에서는 항상 직접 설치된 ChromeDriver 사용
             service = Service(executable_path=chromedriver_path)
             logger.info(f"Using ChromeDriver from: {chromedriver_path}")
             
             self.driver = webdriver.Chrome(service=service, options=self.options)
             self.wait = WebDriverWait(self.driver, 20)
             logger.info("Chrome driver initialized successfully")
+
         except Exception as e:
             error_msg = f"Failed to initialize Chrome driver: {e}"
             logger.error(error_msg)
-            
-            # Railway 환경에서 자주 발생하는 오류들에 대한 추가 정보 제공
             if "Exec format error" in str(e):
                 logger.error("ChromeDriver executable format error - check if correct architecture is used")
-            elif "Permission denied" in str(e):
-                logger.error("ChromeDriver permission denied - check file permissions")
-            elif "No such file or directory" in str(e):
-                logger.error(f"ChromeDriver not found at expected path: {chromedriver_path}")
-            
             raise Exception(error_msg)
 
     def quit_driver(self):
