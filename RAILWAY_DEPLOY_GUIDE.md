@@ -23,7 +23,7 @@ webdriver-manager==4.0.1
 
 ### 2. **Procfile**
 ```
-web: gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --timeout 120
+web: gunicorn --bind 0.0.0.0:5000 app:app --workers 1 --timeout 120
 ```
 
 ### 3. **railway.json**
@@ -34,7 +34,7 @@ web: gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --timeout 120
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --timeout 120 --worker-class sync",
+    "startCommand": "gunicorn --bind 0.0.0.0:5000 app:app --workers 1 --timeout 120 --worker-class sync",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
   }
