@@ -95,13 +95,9 @@ class NaverMapsCrawler:
             # 환경 변수에서 ChromeDriver 경로 확인
             chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
             
-            if os.path.exists(chromedriver_path):
-                service = Service(chromedriver_path)
-                logger.info(f"Using ChromeDriver from: {chromedriver_path}")
-            else:
-                # 로컬 환경에서는 webdriver-manager 사용
-                service = Service(ChromeDriverManager().install())
-                logger.info("Using ChromeDriver from webdriver-manager")
+            # Railway 환경에서는 항상 직접 설치된 ChromeDriver 사용
+            service = Service(chromedriver_path)
+            logger.info(f"Using ChromeDriver from: {chromedriver_path}")
             
             self.driver = webdriver.Chrome(service=service, options=self.options)
             self.wait = WebDriverWait(self.driver, 20)
