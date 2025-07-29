@@ -38,5 +38,5 @@ ENV DISPLAY=:99
 # 포트 노출 (Railway 기본 포트인 5000으로 설정)
 EXPOSE 5000
 
-# 애플리케이션 실행 (환경 변수 $PORT 사용을 위해 쉘 형식으로 변경)
-CMD gunicorn --bind 0.0.0.0:${PORT:-5000} --timeout 300 --workers 1 app:app
+# 애플리케이션 실행 (Railway에서 제공하는 PORT 환경 변수 사용)
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} --timeout 300 --workers 1 app:app"]
