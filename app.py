@@ -78,13 +78,13 @@ class NaverMapsCrawler:
         self.options.add_argument("--memory-pressure-off")
         self.options.add_argument("--max_old_space_size=4096")
         self.options.add_argument("user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        
+
         # Chrome 바이너리 경로 설정 (환경 변수 활용)
         chrome_bin = os.environ.get('CHROME_BIN', '/usr/bin/google-chrome')
         if os.path.exists(chrome_bin):
             self.options.binary_location = chrome_bin
             logger.info(f"Using Chrome binary from: {chrome_bin}")
-        
+
         self.driver = None
         self.wait = None
         self.processed_cafes = set()
@@ -92,25 +92,32 @@ class NaverMapsCrawler:
     def start_driver(self):
         """Initialize the Chrome driver with configured options"""
         try:
+            # 환경 변수에서 ChromeDriver 경로 확인
             chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
-            
-            if not os.path.exists(chromedriver_path):
-                error_msg = f"ChromeDriver not found at the specified path: {chromedriver_path}"
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
 
-            service = Service(executable_path=chromedriver_path)
-            logger.info(f"Using ChromeDriver from: {chromedriver_path}")
-            
+            if os.path.exists(chromedriver_path):
+                service = Service(chromedriver_path)
+                logger.info(f"Using ChromeDriver from: {chromedriver_path}")
+            else:
+                # 로컬 환경에서는 webdriver-manager 사용
+                service = Service(ChromeDriverManager().install())
+                logger.info("Using ChromeDriver from webdriver-manager")
+
             self.driver = webdriver.Chrome(service=service, options=self.options)
             self.wait = WebDriverWait(self.driver, 20)
             logger.info("Chrome driver initialized successfully")
-
         except Exception as e:
             error_msg = f"Failed to initialize Chrome driver: {e}"
             logger.error(error_msg)
+
+            # Railway 환경에서 자주 발생하는 오류들에 대한 추가 정보 제공
             if "Exec format error" in str(e):
                 logger.error("ChromeDriver executable format error - check if correct architecture is used")
+            elif "Permission denied" in str(e):
+                logger.error("ChromeDriver permission denied - check file permissions")
+            elif "No such file or directory" in str(e):
+                logger.error(f"ChromeDriver not found at expected path: {chromedriver_path}")
+
             raise Exception(error_msg)
 
     def quit_driver(self):
@@ -256,11 +263,11 @@ class NaverMapsCrawler:
             else:
                 search_query = "카페"
                 logger.warning("지역명 변환 실패, 기본 검색어 사용")
-            
+
             # 네이버 지도 검색 URL 생성 (지역명 기반)
             search_url = f"https://map.naver.com/v5/search/{quote(search_query)}"
             logger.info(f"네이버 지도 검색 URL: {search_url}")
-            
+
             self.start_driver()
             self.driver.get(search_url)
             time.sleep(7)
@@ -278,7 +285,7 @@ class NaverMapsCrawler:
             for cafe_link in cafe_links:
                 if collected_count >= limit:
                     break
-                    
+
                 try:
                     cafe_name = cafe_link.find_element(By.CSS_SELECTOR, "span.TYaxT").text
 
@@ -315,7 +322,7 @@ class NaverMapsCrawler:
 
                     # 주소를 좌표로 변환
                     coords = get_coords_from_address(address)
-                    
+
                     menu_items = self.get_menu_items()
 
                     cafe_info = {
@@ -325,18 +332,18 @@ class NaverMapsCrawler:
                         "locationKeyword": region_name or "",
                         "menu_items": menu_items
                     }
-                    
+
                     # 좌표 정보 추가 및 거리 계산
                     if coords:
                         cafe_info["latitude"] = coords["lat"]
                         cafe_info["longitude"] = coords["lon"]
-                        
+
                         distance = calculate_distance(
                             lat, lng,
                             coords["lat"], coords["lon"]
                         )
                         cafe_info["distance_km"] = round(distance, 2)
-                        
+
                         if distance <= max_distance_km:
                             cafes.append(cafe_info)
                             self.processed_cafes.add(cafe_key)
@@ -431,21 +438,21 @@ def get_region_name_from_coords(lat: float, lon: float) -> Optional[str]:
     if not KAKAO_API_KEY:
         logger.error("Kakao API 키가 설정되지 않았습니다.")
         return None
-    
+
     try:
         url = "https://dapi.kakao.com/v2/local/geo/coord2address.json"
         headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
         params = {"x": lon, "y": lat}
-        
+
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
-        
+
         if data['documents']:
             # 동 정보가 있는 주소를 우선 사용 (지번 주소 우선, 없으면 도로명 주소)
             address_info = data['documents'][0]
             region_name = None
-            
+
             # 지번 주소에서 동 정보 확인
             if address_info.get('address'):
                 region_2depth = address_info['address']['region_2depth_name']  # 구
@@ -454,7 +461,7 @@ def get_region_name_from_coords(lat: float, lon: float) -> Optional[str]:
                     region_name = f"{region_2depth} {region_3depth}"
                 else:
                     region_name = region_2depth
-            
+
             # 지번 주소에 동 정보가 없으면 도로명 주소 확인
             if not region_3depth and address_info.get('road_address'):
                 region_2depth = address_info['road_address']['region_2depth_name']  # 구
@@ -463,13 +470,13 @@ def get_region_name_from_coords(lat: float, lon: float) -> Optional[str]:
                     region_name = f"{region_2depth} {region_3depth}"
                 elif not region_name:  # 지번 주소도 없었다면
                     region_name = region_2depth
-            
+
             if not region_name:
                 return None
-            
+
             logger.info(f"좌표 {lat}, {lon}을 지역명 '{region_name}'으로 변환")
             return region_name
-        
+
         return None
     except Exception as e:
         logger.error(f"좌표-지역명 변환 오류: {e}")
@@ -534,31 +541,31 @@ def crawl():
         lng = request.args.get('lng', type=float)
         limit = request.args.get('limit', default=10, type=int)
         max_distance = request.args.get('max_distance', default=2.0, type=float)
-        
+
         if lat is None or lng is None:
             return jsonify({"error": "lat과 lng 파라미터가 필요합니다."}), 400
-        
+
         logger.info(f"크롤링 요청: 위도={lat}, 경도={lng}, 제한={limit}, 최대거리={max_distance}km")
-        
+
         # 크롤러 인스턴스 생성
         crawler = NaverMapsCrawler()
-        
+
         # 카페 크롤링 실행
         cafes = crawler.crawl_cafes(lat, lng, limit=limit, max_distance_km=max_distance)
-        
+
         if not cafes:
             return jsonify({"message": "수집된 카페가 없습니다.", "data": []}), 200
-        
+
         # Supabase에 저장
         save_to_supabase(cafes)
-        
+
         return jsonify({
             "message": f"{len(cafes)}개의 카페 정보를 수집했습니다.",
             "data": cafes,
             "search_location": {"lat": lat, "lng": lng},
             "max_distance_km": max_distance
         }), 200
-        
+
     except Exception as e:
         logger.error(f"크롤링 API 오류: {e}")
         return jsonify({"error": str(e)}), 500
